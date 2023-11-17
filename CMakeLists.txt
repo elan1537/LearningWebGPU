@@ -4,8 +4,10 @@ project(
     VERSION 0.1.0
     LANGUAGES CXX C
 )
+add_subdirectory(glfw)
 
 add_executable(App main.cpp)
+target_link_libraries(App PRIVATE glfw)
 
 set_target_properties(App PROPERTIES
     CXX_STANDARD 17
