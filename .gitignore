@@ -1,5 +1,6 @@
 build*/
 glfw/
+webgpu/
 
 .vscode
 

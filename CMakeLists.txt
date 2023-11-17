@@ -4,11 +4,12 @@ project(
     VERSION 0.1.0
     LANGUAGES CXX C
 )
+
 add_subdirectory(glfw)
+add_subdirectory(webgpu)
 
 add_executable(App main.cpp)
-target_link_libraries(App PRIVATE glfw)
-
+target_link_libraries(App PRIVATE glfw webgpu)
 set_target_properties(App PROPERTIES
     CXX_STANDARD 17
     COMPILE_WARNING_AS_ERROR ON
@@ -19,3 +20,5 @@ if (MSVC)
 else()
     target_compile_options(App PRIVATE -Wall -Wextra -pedantic)
 endif()
+
+target_copy_webgpu_binaries(App)
