@@ -1,4 +1,6 @@
-#include "glfw3webgpu.h"
+#include "magic_enum.hpp"
+
+#include <glfw3webgpu.h>
 #include <GLFW/glfw3.h>
 
 #define WEBGPU_CPP_IMPLEMENTATION
@@ -6,9 +8,16 @@
 
 #include <iostream>
 #include <cassert>
-#include <vector>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 
 using namespace wgpu;
+namespace fs = std::filesystem;
+
+ShaderModule loadShaderModule(const fs::path& path, Device device);
+bool loadGeometry(const fs::path& path, std::vector<float>& pointData, std::vector<uint16_t>& indexData);
 
 int main (int, char**) {
 	Instance instance = createInstance(InstanceDescriptor{});
@@ -37,11 +46,22 @@ int main (int, char**) {
 	Adapter adapter = instance.requestAdapter(adapterOpts);
 	std::cout << "Got adapter: " << adapter << std::endl;
 
+	SupportedLimits supportedLimits;
+	adapter.getLimits(&supportedLimits);
+
 	std::cout << "Requesting device..." << std::endl;
+	RequiredLimits requiredLimits = Default;
+	requiredLimits.limits.maxVertexAttributes = 2;
+	requiredLimits.limits.maxVertexBuffers = 1;
+	requiredLimits.limits.maxBufferSize = 15 * 5 * sizeof(float);
+	requiredLimits.limits.maxVertexBufferArrayStride = 5 * sizeof(float);
+	requiredLimits.limits.minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment;
+	requiredLimits.limits.minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment;
+	requiredLimits.limits.maxInterStageShaderComponents = 3;
+
 	DeviceDescriptor deviceDesc;
 	deviceDesc.label = "My Device";
-	// deviceDesc.requiredFeaturesCount = 0;
-	deviceDesc.requiredLimits = nullptr;
+	deviceDesc.requiredLimits = &requiredLimits;
 	deviceDesc.defaultQueue.label = "The default queue";
 	Device device = adapter.requestDevice(deviceDesc);
 	std::cout << "Got device: " << device << std::endl;
@@ -69,78 +89,48 @@ int main (int, char**) {
 	swapChainDesc.presentMode = PresentMode::Fifo;
 	SwapChain swapChain = device.createSwapChain(surface, swapChainDesc);
 	std::cout << "Swapchain: " << swapChain << std::endl;
+	// If the format contains "Srgb", we will have a gamma issue
+	std::cout << "Swapchain format: " << magic_enum::enum_name<WGPUTextureFormat>(swapChainFormat) << std::endl;
 
 	std::cout << "Creating shader module..." << std::endl;
-	const char* shaderSource = R"(
-    @vertex
-    fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> @builtin(position) vec4<f32> {
-        var p = vec2f(0.0, 0.0);
-        if (in_vertex_index == 0u) {
-            p = vec2f(-0.5, -0.5);
-        } else if (in_vertex_index == 1u) {
-            p = vec2f(0.5, -0.5);
-        } else {
-            p = vec2f(0.0, 0.5);
-        }
-        return vec4f(p, 0.0, 1.0);
-    }
-
-    @fragment
-    fn fs_main() -> @location(0) vec4f {
-            return vec4f(0.0, 0.4, 1.0, 1.0);
-        }
-    )";
-
-	ShaderModuleDescriptor shaderDesc;
-#ifdef WEBGPU_BACKEND_WGPU
-	shaderDesc.hintCount = 0;
-	shaderDesc.hints = nullptr;
-#endif
-
-	// Use the extension mechanism to load a WGSL shader source code
-	ShaderModuleWGSLDescriptor shaderCodeDesc;
-	// Set the chained struct's header
-	shaderCodeDesc.chain.next = nullptr;
-	shaderCodeDesc.chain.sType = SType::ShaderModuleWGSLDescriptor;
-	// Connect the chain
-	shaderDesc.nextInChain = &shaderCodeDesc.chain;
-
-	// Setup the actual payload of the shader code descriptor
-	shaderCodeDesc.code = shaderSource;
-
-	ShaderModule shaderModule = device.createShaderModule(shaderDesc);
+	ShaderModule shaderModule = loadShaderModule(RESOURCE_DIR "/shader.wgsl", device);
 	std::cout << "Shader module: " << shaderModule << std::endl;
 
 	std::cout << "Creating render pipeline..." << std::endl;
 	RenderPipelineDescriptor pipelineDesc;
 
 	// Vertex fetch
-	// (We don't use any input buffer so far)
-	pipelineDesc.vertex.bufferCount = 0;
-	pipelineDesc.vertex.buffers = nullptr;
+	std::vector<VertexAttribute> vertexAttribs(2);
 
-	// Vertex shader
+	// Position attribute
+	vertexAttribs[0].shaderLocation = 0;
+	vertexAttribs[0].format = VertexFormat::Float32x2;
+	vertexAttribs[0].offset = 0;
+
+	// Color attribute
+	vertexAttribs[1].shaderLocation = 1;
+	vertexAttribs[1].format = VertexFormat::Float32x3;
+	vertexAttribs[1].offset = 2 * sizeof(float);
+
+	VertexBufferLayout vertexBufferLayout;
+	vertexBufferLayout.attributeCount = (uint32_t)vertexAttribs.size();
+	vertexBufferLayout.attributes = vertexAttribs.data();
+	vertexBufferLayout.arrayStride = 5 * sizeof(float);
+	vertexBufferLayout.stepMode = VertexStepMode::Vertex;
+
+	pipelineDesc.vertex.bufferCount = 1;
+	pipelineDesc.vertex.buffers = &vertexBufferLayout;
+
 	pipelineDesc.vertex.module = shaderModule;
 	pipelineDesc.vertex.entryPoint = "vs_main";
 	pipelineDesc.vertex.constantCount = 0;
 	pipelineDesc.vertex.constants = nullptr;
 
-	// Primitive assembly and rasterization
-	// Each sequence of 3 vertices is considered as a triangle
 	pipelineDesc.primitive.topology = PrimitiveTopology::TriangleList;
-	// We'll see later how to specify the order in which vertices should be
-	// connected. When not specified, vertices are considered sequentially.
 	pipelineDesc.primitive.stripIndexFormat = IndexFormat::Undefined;
-	// The face orientation is defined by assuming that when looking
-	// from the front of the face, its corner vertices are enumerated
-	// in the counter-clockwise (CCW) order.
 	pipelineDesc.primitive.frontFace = FrontFace::CCW;
-	// But the face orientation does not matter much because we do not
-	// cull (i.e. "hide") the faces pointing away from us (which is often
-	// used for optimization).
 	pipelineDesc.primitive.cullMode = CullMode::None;
 
-	// Fragment shader
 	FragmentState fragmentState;
 	pipelineDesc.fragment = &fragmentState;
 	fragmentState.module = shaderModule;
@@ -148,13 +138,10 @@ int main (int, char**) {
 	fragmentState.constantCount = 0;
 	fragmentState.constants = nullptr;
 
-	// Configure blend state
 	BlendState blendState;
-	// Usual alpha blending for the color:
 	blendState.color.srcFactor = BlendFactor::SrcAlpha;
 	blendState.color.dstFactor = BlendFactor::OneMinusSrcAlpha;
 	blendState.color.operation = BlendOperation::Add;
-	// We leave the target alpha untouched:
 	blendState.alpha.srcFactor = BlendFactor::Zero;
 	blendState.alpha.dstFactor = BlendFactor::One;
 	blendState.alpha.operation = BlendOperation::Add;
@@ -162,31 +149,55 @@ int main (int, char**) {
 	ColorTargetState colorTarget;
 	colorTarget.format = swapChainFormat;
 	colorTarget.blend = &blendState;
-	colorTarget.writeMask = ColorWriteMask::All; // We could write to only some of the color channels.
+	colorTarget.writeMask = ColorWriteMask::All;
 
-	// We have only one target because our render pass has only one output color
-	// attachment.
 	fragmentState.targetCount = 1;
 	fragmentState.targets = &colorTarget;
 	
-	// Depth and stencil tests are not used here
 	pipelineDesc.depthStencil = nullptr;
 
-	// Multi-sampling
-	// Samples per pixel
 	pipelineDesc.multisample.count = 1;
-	// Default value for the mask, meaning "all bits on"
 	pipelineDesc.multisample.mask = ~0u;
-	// Default value as well (irrelevant for count = 1 anyways)
 	pipelineDesc.multisample.alphaToCoverageEnabled = false;
 
-	// Pipeline layout
-	pipelineDesc.layout = nullptr;
+	PipelineLayoutDescriptor layoutDesc;
+	layoutDesc.bindGroupLayoutCount = 0;
+	layoutDesc.bindGroupLayouts = nullptr;
+	PipelineLayout layout = device.createPipelineLayout(layoutDesc);
+	pipelineDesc.layout = layout;
 
 	RenderPipeline pipeline = device.createRenderPipeline(pipelineDesc);
 	std::cout << "Render pipeline: " << pipeline << std::endl;
 
-    while (!glfwWindowShouldClose(window)) {
+	std::vector<float> pointData;
+	std::vector<uint16_t> indexData;
+
+	bool success = loadGeometry(RESOURCE_DIR "/webgpu.txt", pointData, indexData);
+	if (!success) {
+		std::cerr << "Could not load geometry!" << std::endl;
+		return 1;
+	}
+
+	// Create vertex buffer
+	BufferDescriptor bufferDesc;
+	bufferDesc.size = pointData.size() * sizeof(float);
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Vertex;
+	bufferDesc.mappedAtCreation = false;
+	Buffer vertexBuffer = device.createBuffer(bufferDesc);
+	queue.writeBuffer(vertexBuffer, 0, pointData.data(), bufferDesc.size);
+
+	// Index Buffer alignment
+	int indexCount = static_cast<int>(indexData.size());
+
+	// Create index buffer
+	// (we reuse the bufferDesc initialized for the vertexBuffer)
+	bufferDesc.size = indexData.size() * sizeof(float);
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Index;
+	bufferDesc.mappedAtCreation = false;
+	Buffer indexBuffer = device.createBuffer(bufferDesc);
+	queue.writeBuffer(indexBuffer, 0, indexData.data(), bufferDesc.size);
+
+	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
 
 		TextureView nextTexture = swapChain.getCurrentTextureView();
@@ -201,25 +212,30 @@ int main (int, char**) {
 		
 		RenderPassDescriptor renderPassDesc;
 
-		RenderPassColorAttachment renderPassColorAttachment;
+		RenderPassColorAttachment renderPassColorAttachment{};
 		renderPassColorAttachment.view = nextTexture;
 		renderPassColorAttachment.resolveTarget = nullptr;
 		renderPassColorAttachment.loadOp = LoadOp::Clear;
 		renderPassColorAttachment.storeOp = StoreOp::Store;
-		renderPassColorAttachment.clearValue = Color{ 0.9, 0.1, 0.2, 1.0 };
+		renderPassColorAttachment.clearValue = Color{ 0.05, 0.05, 0.05, 1.0 };
 		renderPassDesc.colorAttachmentCount = 1;
 		renderPassDesc.colorAttachments = &renderPassColorAttachment;
 
 		renderPassDesc.depthStencilAttachment = nullptr;
-		// renderPassDesc.timestampWriteCount = 0;
 		renderPassDesc.timestampWrites = nullptr;
 		RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
 
-		// In its overall outline, drawing a triangle is as simple as this:
-		// Select which render pipeline to use
 		renderPass.setPipeline(pipeline);
-		// Draw 1 instance of a 3-vertices shape
-		renderPass.draw(3, 1, 0, 0);
+
+		// Set both vertex and index buffers
+		renderPass.setVertexBuffer(0, vertexBuffer, 0, pointData.size() * sizeof(float));
+		// The second argument must correspond to the choice of uint16_t or uint32_t
+		// we've done when creating the index buffer.
+		renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexData.size() * sizeof(uint16_t));
+
+		// Replace `draw()` with `drawIndexed()` and `vertexCount` with `indexCount`
+		// The extra argument is an offset within the index buffer.
+		renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
 
 		renderPass.end();
 		
@@ -231,15 +247,99 @@ int main (int, char**) {
 		queue.submit(command);
 
 		swapChain.present();
+
+#ifdef WEBGPU_BACKEND_DAWN
+		// Check for pending error callbacks
+		device.tick();
+#endif
 	}
 
-    swapChain.release();
-    device.release();
-    adapter.release();
-    instance.release();
+	vertexBuffer.destroy();
+	vertexBuffer.release();
+	indexBuffer.destroy();
+	indexBuffer.release();
 
-    glfwDestroyWindow(window);
-    glfwTerminate();
+	swapChain.release();
+	device.release();
+	adapter.release();
+	instance.release();
+	glfwDestroyWindow(window);
+	glfwTerminate();
 
-    return 0;
+	return 0;
+}
+
+ShaderModule loadShaderModule(const fs::path& path, Device device) {
+	std::ifstream file(path);
+	if (!file.is_open()) {
+		return nullptr;
+	}
+	file.seekg(0, std::ios::end);
+	size_t size = file.tellg();
+	std::string shaderSource(size, ' ');
+	file.seekg(0);
+	file.read(shaderSource.data(), size);
+
+	ShaderModuleWGSLDescriptor shaderCodeDesc;
+	shaderCodeDesc.chain.next = nullptr;
+	shaderCodeDesc.chain.sType = SType::ShaderModuleWGSLDescriptor;
+	shaderCodeDesc.code = shaderSource.c_str();
+	ShaderModuleDescriptor shaderDesc;
+	shaderDesc.nextInChain = &shaderCodeDesc.chain;
+#ifdef WEBGPU_BACKEND_WGPU
+	shaderDesc.hintCount = 0;
+	shaderDesc.hints = nullptr;
+#endif
+
+	return device.createShaderModule(shaderDesc);
+}
+
+bool loadGeometry(const fs::path& path, std::vector<float>& pointData, std::vector<uint16_t>& indexData) {
+	std::ifstream file(path);
+	if (!file.is_open()) {
+		return false;
+	}
+
+	pointData.clear();
+	indexData.clear();
+
+	enum class Section {
+		None,
+		Points,
+		Indices,
+	};
+	Section currentSection = Section::None;
+
+	float value;
+	uint16_t index;
+	std::string line;
+	while (!file.eof()) {
+		getline(file, line);
+		if (line == "[points]") {
+			currentSection = Section::Points;
+		}
+		else if (line == "[indices]") {
+			currentSection = Section::Indices;
+		}
+		else if (line[0] == '#' || line.empty()) {
+			// Do nothing, this is a comment
+		}
+		else if (currentSection == Section::Points) {
+			std::istringstream iss(line);
+			// Get x, y, r, g, b
+			for (int i = 0; i < 5; ++i) {
+				iss >> value;
+				pointData.push_back(value);
+			}
+		}
+		else if (currentSection == Section::Indices) {
+			std::istringstream iss(line);
+			// Get corners #0 #1 and #2
+			for (int i = 0; i < 3; ++i) {
+				iss >> index;
+				indexData.push_back(index);
+			}
+		}
+	}
+	return true;
 }
