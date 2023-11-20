@@ -12,12 +12,31 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <array>
 
 using namespace wgpu;
 namespace fs = std::filesystem;
 
+struct MyUniforms {
+	// offset = 0 * sizeof(vec4f) -> OK
+	std::array<float, 4> color;
+
+	// offset = 16 = 4 * sizeof(f32) -> OK
+	float time;
+
+	// Add padding to make sure the struct is host-shareable
+	float _pad[3];
+};
+// Have the compiler check byte alignment
+static_assert(sizeof(MyUniforms) % 16 == 0);
+
 ShaderModule loadShaderModule(const fs::path& path, Device device);
 bool loadGeometry(const fs::path& path, std::vector<float>& pointData, std::vector<uint16_t>& indexData);
+
+uint32_t ceilToNextMultiple(uint32_t value, uint32_t step) {
+	uint32_t divide_and_ceil = value / step + (value % step == 0 ? 0 : 1);
+	return step * divide_and_ceil;
+}
 
 int main (int, char**) {
 	Instance instance = createInstance(InstanceDescriptor{});
@@ -41,7 +60,7 @@ int main (int, char**) {
 
 	std::cout << "Requesting adapter..." << std::endl;
 	Surface surface = glfwGetWGPUSurface(instance, window);
-	RequestAdapterOptions adapterOpts;
+	RequestAdapterOptions adapterOpts{};
 	adapterOpts.compatibleSurface = surface;
 	Adapter adapter = instance.requestAdapter(adapterOpts);
 	std::cout << "Got adapter: " << adapter << std::endl;
@@ -58,13 +77,21 @@ int main (int, char**) {
 	requiredLimits.limits.minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment;
 	requiredLimits.limits.minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment;
 	requiredLimits.limits.maxInterStageShaderComponents = 3;
+	requiredLimits.limits.maxBindGroups = 1;
+	requiredLimits.limits.maxUniformBuffersPerShaderStage = 1;
+	requiredLimits.limits.maxUniformBufferBindingSize = 16 * 4;
+	requiredLimits.limits.maxDynamicUniformBuffersPerPipelineLayout = 1;
 
 	DeviceDescriptor deviceDesc;
 	deviceDesc.label = "My Device";
+	// deviceDesc.requiredFeaturesCount = 0;
 	deviceDesc.requiredLimits = &requiredLimits;
 	deviceDesc.defaultQueue.label = "The default queue";
 	Device device = adapter.requestDevice(deviceDesc);
 	std::cout << "Got device: " << device << std::endl;
+
+	device.getLimits(&supportedLimits);
+	Limits deviceLimits = supportedLimits.limits;
 
 	// Add an error callback for more debug info
 	auto h = device.setUncapturedErrorCallback([](ErrorType type, char const* message) {
@@ -81,7 +108,7 @@ int main (int, char**) {
 #else
 	TextureFormat swapChainFormat = TextureFormat::BGRA8Unorm;
 #endif
-	SwapChainDescriptor swapChainDesc;
+	SwapChainDescriptor swapChainDesc = {};
 	swapChainDesc.width = 640;
 	swapChainDesc.height = 480;
 	swapChainDesc.usage = TextureUsage::RenderAttachment;
@@ -89,8 +116,6 @@ int main (int, char**) {
 	swapChainDesc.presentMode = PresentMode::Fifo;
 	SwapChain swapChain = device.createSwapChain(surface, swapChainDesc);
 	std::cout << "Swapchain: " << swapChain << std::endl;
-	// If the format contains "Srgb", we will have a gamma issue
-	std::cout << "Swapchain format: " << magic_enum::enum_name<WGPUTextureFormat>(swapChainFormat) << std::endl;
 
 	std::cout << "Creating shader module..." << std::endl;
 	ShaderModule shaderModule = loadShaderModule(RESOURCE_DIR "/shader.wgsl", device);
@@ -138,7 +163,7 @@ int main (int, char**) {
 	fragmentState.constantCount = 0;
 	fragmentState.constants = nullptr;
 
-	BlendState blendState;
+	BlendState blendState{};
 	blendState.color.srcFactor = BlendFactor::SrcAlpha;
 	blendState.color.dstFactor = BlendFactor::OneMinusSrcAlpha;
 	blendState.color.operation = BlendOperation::Add;
@@ -160,9 +185,26 @@ int main (int, char**) {
 	pipelineDesc.multisample.mask = ~0u;
 	pipelineDesc.multisample.alphaToCoverageEnabled = false;
 
+	// Create binding layout (don't forget to = Default)
+	BindGroupLayoutEntry bindingLayout = Default;
+	// The binding index as used in the @binding attribute in the shader
+	bindingLayout.binding = 0;
+	// The stage that needs to access this resource
+	bindingLayout.visibility = ShaderStage::Vertex | ShaderStage::Fragment;
+	bindingLayout.buffer.type = BufferBindingType::Uniform;
+	bindingLayout.buffer.minBindingSize = sizeof(MyUniforms);
+	bindingLayout.buffer.hasDynamicOffset = true;
+
+	// Create a bind group layout
+	BindGroupLayoutDescriptor bindGroupLayoutDesc;
+	bindGroupLayoutDesc.entryCount = 1;
+	bindGroupLayoutDesc.entries = &bindingLayout;
+	BindGroupLayout bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
+
+	// Create the pipeline layout
 	PipelineLayoutDescriptor layoutDesc;
-	layoutDesc.bindGroupLayoutCount = 0;
-	layoutDesc.bindGroupLayouts = nullptr;
+	layoutDesc.bindGroupLayoutCount = 1;
+	layoutDesc.bindGroupLayouts = (WGPUBindGroupLayout*)&bindGroupLayout;
 	PipelineLayout layout = device.createPipelineLayout(layoutDesc);
 	pipelineDesc.layout = layout;
 
@@ -186,19 +228,61 @@ int main (int, char**) {
 	Buffer vertexBuffer = device.createBuffer(bufferDesc);
 	queue.writeBuffer(vertexBuffer, 0, pointData.data(), bufferDesc.size);
 
-	// Index Buffer alignment
 	int indexCount = static_cast<int>(indexData.size());
-
+	
 	// Create index buffer
-	// (we reuse the bufferDesc initialized for the vertexBuffer)
 	bufferDesc.size = indexData.size() * sizeof(float);
 	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Index;
 	bufferDesc.mappedAtCreation = false;
 	Buffer indexBuffer = device.createBuffer(bufferDesc);
 	queue.writeBuffer(indexBuffer, 0, indexData.data(), bufferDesc.size);
 
+
+	uint32_t uniformStride = ceilToNextMultiple(
+		(uint32_t)sizeof(MyUniforms),
+		(uint32_t)deviceLimits.minUniformBufferOffsetAlignment
+	);
+
+	// Create uniform buffer
+	// The buffer will only contain 1 float with the value of uTime
+	bufferDesc.size = uniformStride + sizeof(MyUniforms);
+	// Make sure to flag the buffer as BufferUsage::Uniform
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform;
+	bufferDesc.mappedAtCreation = false;
+	Buffer uniformBuffer = device.createBuffer(bufferDesc);
+
+	MyUniforms uniforms;
+	uniforms.time = 1.0f;
+	uniforms.color = { 0.0f, 1.0f, 0.4f, 1.0f };
+	queue.writeBuffer(uniformBuffer, 0, &uniforms, sizeof(MyUniforms));
+
+	uniforms.time = -1.0f;
+	uniforms.color = {1.0f, 1.0f, 1.0f, 0.7f};
+	queue.writeBuffer(uniformBuffer, uniformStride, &uniforms, sizeof(MyUniforms));
+
+	// Create a binding
+	BindGroupEntry binding;
+	binding.binding = 0;
+	binding.buffer = uniformBuffer;
+	binding.offset = 0;
+	binding.size = sizeof(MyUniforms);
+
+	// A bind group contains one or multiple bindings
+	BindGroupDescriptor bindGroupDesc;
+	bindGroupDesc.layout = bindGroupLayout;
+	bindGroupDesc.entryCount = bindGroupLayoutDesc.entryCount;
+	bindGroupDesc.entries = &binding;
+	BindGroup bindGroup = device.createBindGroup(bindGroupDesc);
+
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
+
+		// Update uniform buffer
+		uniforms.time = static_cast<float>(glfwGetTime()); // glfwGetTime returns a double
+		queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, time), &uniforms.time, sizeof(MyUniforms::time));
+
+		uniforms.color = {1.0f, 0.5f, 0.0f, 1.0f};
+		queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, color), &uniforms.color, sizeof(MyUniforms::color));
 
 		TextureView nextTexture = swapChain.getCurrentTextureView();
 		if (!nextTexture) {
@@ -206,7 +290,7 @@ int main (int, char**) {
 			return 1;
 		}
 
-		CommandEncoderDescriptor commandEncoderDesc;
+		CommandEncoderDescriptor commandEncoderDesc{};
 		commandEncoderDesc.label = "Command Encoder";
 		CommandEncoder encoder = device.createCommandEncoder(commandEncoderDesc);
 		
@@ -222,19 +306,26 @@ int main (int, char**) {
 		renderPassDesc.colorAttachments = &renderPassColorAttachment;
 
 		renderPassDesc.depthStencilAttachment = nullptr;
+		// renderPassDesc.timestampWriteCount = 0;
 		renderPassDesc.timestampWrites = nullptr;
 		RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
 
 		renderPass.setPipeline(pipeline);
 
-		// Set both vertex and index buffers
 		renderPass.setVertexBuffer(0, vertexBuffer, 0, pointData.size() * sizeof(float));
-		// The second argument must correspond to the choice of uint16_t or uint32_t
-		// we've done when creating the index buffer.
 		renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexData.size() * sizeof(uint16_t));
 
-		// Replace `draw()` with `drawIndexed()` and `vertexCount` with `indexCount`
-		// The extra argument is an offset within the index buffer.
+		// Set binding group
+		uint32_t dynamicOffset = 0;
+
+		// Set binding group
+		dynamicOffset = 0 * uniformStride;
+		renderPass.setBindGroup(0, bindGroup, 1, &dynamicOffset);
+		renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
+
+		// Set binding group with a different uniform offset
+		dynamicOffset = 1 * uniformStride;
+		renderPass.setBindGroup(0, bindGroup, 1, &dynamicOffset);
 		renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
 
 		renderPass.end();
@@ -247,7 +338,6 @@ int main (int, char**) {
 		queue.submit(command);
 
 		swapChain.present();
-
 #ifdef WEBGPU_BACKEND_DAWN
 		// Check for pending error callbacks
 		device.tick();
