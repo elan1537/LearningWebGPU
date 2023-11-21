@@ -23,17 +23,20 @@ struct MyUniforms {
 fn vs_main(in: VertexInput) -> VertexOutput {
 	var out: VertexOutput;
 	let ratio = 640.0 / 480.0;
+	var offset = vec2f(0.0);
+
 	let angle = uMyUniforms.time;
+
 	let alpha: f32 = cos(angle);
 	let beta: f32 = sin(angle);
-
 	var position = vec3f(
 		in.position.x,
 		alpha * in.position.y + beta * in.position.z,
 		alpha * in.position.z - beta * in.position.y
 	);
 
-	out.position = vec4f(position.x, position.y * ratio, 0.0, 1.0);
+	out.position = vec4f(position.x, position.y * ratio, position.z * 0.5 + 0.5, 1.0);
+	
 	out.color = in.color;
 	return out;
 }

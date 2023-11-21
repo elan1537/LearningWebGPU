@@ -82,6 +82,11 @@ int main (int, char**) {
 	requiredLimits.limits.maxUniformBufferBindingSize = 16 * 4;
 	requiredLimits.limits.maxDynamicUniformBuffersPerPipelineLayout = 1;
 
+	// For the depth buffer, we enable textures (up to the size of the window):
+	requiredLimits.limits.maxTextureDimension1D = 480;
+	requiredLimits.limits.maxTextureDimension2D = 640;
+	requiredLimits.limits.maxTextureArrayLayers = 1;
+
 	DeviceDescriptor deviceDesc;
 	deviceDesc.label = "My Device";
 	// deviceDesc.requiredFeaturesCount = 0;
@@ -178,8 +183,42 @@ int main (int, char**) {
 
 	fragmentState.targetCount = 1;
 	fragmentState.targets = &colorTarget;
-	
-	pipelineDesc.depthStencil = nullptr;
+
+	// Depth state
+	DepthStencilState depthStencilState = Default;
+	// Setup depth state
+	pipelineDesc.depthStencil = &depthStencilState;
+	depthStencilState.depthCompare = CompareFunction::Less;
+	depthStencilState.depthWriteEnabled = true;
+
+	// Store the format in a variable as later parts of the code depend on it
+	TextureFormat depthTextureFormat = TextureFormat::Depth24Plus;
+	depthStencilState.format = depthTextureFormat;
+	depthStencilState.stencilReadMask = 0;
+	depthStencilState.stencilWriteMask = 0;
+
+	// Create the depth texture
+	TextureDescriptor depthTextureDesc;
+	depthTextureDesc.dimension = TextureDimension::_2D;
+	depthTextureDesc.format = depthTextureFormat;
+	depthTextureDesc.mipLevelCount = 1;
+	depthTextureDesc.sampleCount = 1;
+	depthTextureDesc.size = {640, 480, 1};
+	depthTextureDesc.usage = TextureUsage::RenderAttachment;
+	depthTextureDesc.viewFormatCount = 1;
+	depthTextureDesc.viewFormats = (WGPUTextureFormat*)&depthTextureFormat;
+	Texture depthTexture = device.createTexture(depthTextureDesc);
+
+	// Create the view of the depth texture manipulated by the rasterizer
+	TextureViewDescriptor depthTextureViewDesc;
+	depthTextureViewDesc.aspect = TextureAspect::DepthOnly;
+	depthTextureViewDesc.baseArrayLayer = 0;
+	depthTextureViewDesc.arrayLayerCount = 1;
+	depthTextureViewDesc.baseMipLevel = 0;
+	depthTextureViewDesc.mipLevelCount = 1;
+	depthTextureViewDesc.dimension = TextureViewDimension::_2D;
+	depthTextureViewDesc.format = depthTextureFormat;
+	TextureView depthTextureView = depthTexture.createView(depthTextureViewDesc);
 
 	pipelineDesc.multisample.count = 1;
 	pipelineDesc.multisample.mask = ~0u;
@@ -305,7 +344,25 @@ int main (int, char**) {
 		renderPassDesc.colorAttachmentCount = 1;
 		renderPassDesc.colorAttachments = &renderPassColorAttachment;
 
-		renderPassDesc.depthStencilAttachment = nullptr;
+		// depth/stencil attachment add
+		RenderPassDepthStencilAttachment depthStencilAttachment;
+		depthStencilAttachment.view = depthTextureView;
+		depthStencilAttachment.depthClearValue = 1.0f;
+		depthStencilAttachment.depthLoadOp = LoadOp::Clear;
+		depthStencilAttachment.depthStoreOp = StoreOp::Store;
+		depthStencilAttachment.depthReadOnly = false;
+
+		depthStencilAttachment.stencilClearValue = 0;
+#ifdef WEBGPU_BACKEND_WGPU
+		depthStencilAttachment.stencilLoadOp = LoadOp::Clear;
+		depthStencilAttachment.stencilStoreOp = StoreOp::Store;
+#else
+		depthStencilAttachment.stencilLoadOp = LoadOp::Undefined;
+		depthStencilAttachment.stencilStoreOp = StoreOp::Undefined;
+#endif
+		depthStencilAttachment.stencilReadOnly = true;
+
+		renderPassDesc.depthStencilAttachment = &depthStencilAttachment;
 		// renderPassDesc.timestampWriteCount = 0;
 		renderPassDesc.timestampWrites = nullptr;
 		RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
@@ -343,6 +400,10 @@ int main (int, char**) {
 		device.tick();
 #endif
 	}
+
+	depthTextureView.release();
+	depthTexture.destroy();
+	depthTexture.release();
 
 	vertexBuffer.destroy();
 	vertexBuffer.release();
